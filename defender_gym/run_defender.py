@@ -1,18 +1,21 @@
 """Isolated test of the defender policies (same idea as run_attacker.py).
- 
+
 Plays each defender policy for N episodes against a fixed attacker, on the
 small and the medium scenario, prints the average results, and saves a
 chart to defender_vs_<attacker>.png.
- 
+
 Usage (from inside defender_gym/, with the venv active):
     python run_defender.py ../NASimEmu-master/scenarios [episodes] [greedy|random]
- 
+
+[episodes] sets the small scenario (default 100). Medium always runs
+MEDIUM_EPISODES (200); change it below if needed.
+
 What a healthy result looks like:
     - none is the worst (or tied worst) on exposure: it is the baseline
     - sweep beats none and random on exposure, at some action cost
     - learned (untrained) scores about the same as random
     - learned never picks a padded (non-existent) host row
- 
+
 "win %" is the share of episodes that end with no sensitive host breached
 (the defender win rate from the proposal). "vs none" is the defender's mean
 reward minus NoDefense's on the same size, so positive = better than doing
@@ -22,22 +25,22 @@ cost (Monitor 0.01, Restore 0.1) is flat: it charges every Restore the same,
 so it does NOT penalize false positives specifically.
 """
 import sys
- 
+
 import matplotlib
 matplotlib.use("Agg")  # save to a file, no window needed
 import matplotlib.pyplot as plt
 import numpy as np
- 
+
 from env import DefenderEnv, RESTORE
 from policies import GreedyAttacker, NoDefense, RandomAttacker, RandomDefender, SweepDefender
- 
+
 # The learned policy needs torch. If torch isn't installed, skip it
 # instead of crashing, so the scripted defenders can still be tested.
 try:
     from policies.learned import LearnedPolicy
 except ImportError:
     LearnedPolicy = None
- 
+
 # Use the two_subnets scenarios: the one_subnet ones have no sensitive hosts,
 # so exposure (and the defender's loss) would always be 0.
 SCENARIOS = {
@@ -45,11 +48,13 @@ SCENARIOS = {
     "medium": "md_entry_dmz_two_subnets",
 }
 ATTACKERS = {"greedy": GreedyAttacker, "random": RandomAttacker}
- 
- 
+# Medium has its own episode count, separate from the [episodes] argument.
+MEDIUM_EPISODES = 200
+
+
 def run_episodes(env, policy, episodes):
     """Play `episodes` full games with `policy` as the defender.
- 
+
     Returns:
       totals   - total defender reward per episode
       breached - sensitive hosts compromised at the end of each episode
@@ -66,7 +71,7 @@ def run_episodes(env, policy, episodes):
         # needs it to restart its sweep).
         obs = env.reset()
         policy.reset()
- 
+
         done, total, paid, n_rest, n_false, bad_picks, curve = False, 0.0, 0.0, 0, 0, 0, []
         while not done:
             mask = env.host_mask()  # True for real hosts, False for padding
@@ -85,7 +90,7 @@ def run_episodes(env, policy, episodes):
             obs, r, done, info = env.step(action)
             total += r
             curve.append(info["exposure"])  # 0 = nothing taken, 1 = all sensitive hosts rooted
- 
+
         totals.append(total)
         breached.append(info["breached"])
         cost.append(paid)
@@ -96,8 +101,8 @@ def run_episodes(env, policy, episodes):
     return dict(totals=np.array(totals), breached=np.array(breached), cost=np.array(cost),
                 restores=np.array(restores), false_r=np.array(false_r),
                 padded=np.array(padded), curve=np.array(curves).mean(axis=0))
- 
- 
+
+
 def make_defenders(env):
     """Build the defenders to test. A new set is made per scenario."""
     defenders = {"none": NoDefense(), "random": RandomDefender(), "sweep": SweepDefender()}
@@ -106,30 +111,31 @@ def make_defenders(env):
         # (4 features per host, 3 action kinds).
         defenders["learned"] = LearnedPolicy.for_env(env)
     return defenders
- 
- 
+
+
 if __name__ == "__main__":
     folder = sys.argv[1] if len(sys.argv) > 1 else "scenarios"
     episodes = int(sys.argv[2]) if len(sys.argv) > 2 else 100
     attacker_name = sys.argv[3] if len(sys.argv) > 3 else "greedy"
- 
+
     if LearnedPolicy is None:
         print("torch not installed: skipping the learned policy\n")
- 
+
     # results[size][label] = dict from run_episodes, used for the chart
     results = {}
+    n_episodes = {"small": episodes, "medium": MEDIUM_EPISODES}
     for size, name in SCENARIOS.items():
         # The attacker is fixed for the whole run, like NoDefense was fixed
         # in run_attacker.py. Greedy is the strongest scripted attacker.
         env = DefenderEnv(f"{folder}/{name}.v2.yaml", attacker=ATTACKERS[attacker_name]())
- 
+
         print(f"=== {size} ({name}) vs {attacker_name} attacker, "
-              f"{episodes} episodes x {env.max_steps} steps")
+              f"{n_episodes[size]} episodes x {env.max_steps} steps")
         print(f"{'defender':<9} {'reward (mean +- std)':>22} {'vs none':>8} {'breached':>9} "
               f"{'win %':>6} {'cost':>6} {'restores':>9} {'false restores':>15} {'padded':>7}")
         results[size] = {}
         for label, policy in make_defenders(env).items():
-            res = run_episodes(env, policy, episodes)
+            res = run_episodes(env, policy, n_episodes[size])
             results[size][label] = res
             t = res["totals"]
             gap = t.mean() - results[size]["none"]["totals"].mean()  # "none" runs first
@@ -138,7 +144,7 @@ if __name__ == "__main__":
                   f"{res['cost'].mean():>6.2f} {res['restores'].mean():>9.1f} "
                   f"{res['false_r'].mean():>15.1f} {res['padded'].sum():>7d}")
         print()
- 
+
     # Chart: one row per scenario size, four panels per row.
     #   1 - exposure over the episode (lower = better defense)
     #   2 - sensitive hosts breached at the end (lower = better)
@@ -149,15 +155,15 @@ if __name__ == "__main__":
     for (size, by_def), (ax1, ax2, ax3, ax4) in zip(results.items(), axes):
         labels = list(by_def)
         bar_colors = [colors[l] for l in labels]
- 
+
         for label, res in by_def.items():
             ax1.plot(res["curve"], label=label, color=colors[label])
-        ax1.set_title(f"{size}: exposure per step (mean)")
+        ax1.set_title(f"{size}: exposure per step (mean, {n_episodes[size]} episodes)")
         ax1.set_xlabel("step")
         ax1.set_ylabel("exposure (0 to 1)")
         ax1.set_ylim(0, 1)
         ax1.legend()
- 
+
         # Bars show the mean, error bars show one standard deviation.
         for ax, key, title, ylabel in [
                 (ax2, "breached", "sensitive hosts breached at end", "hosts"),
@@ -168,10 +174,10 @@ if __name__ == "__main__":
                    capsize=6, color=bar_colors)
             ax.set_title(f"{size}: {title}")
             ax.set_ylabel(ylabel)
- 
-    fig.suptitle(f"Defender policies vs {attacker_name} attacker, {episodes} episodes each")
+
+    fig.suptitle(f"Defender policies vs {attacker_name} attacker "
+                 f"({n_episodes['small']} small / {n_episodes['medium']} medium episodes)")
     fig.tight_layout()
     out = f"defender_vs_{attacker_name}.png"
     fig.savefig(out, dpi=150)
     print(f"Saved chart to {out}")
- 
