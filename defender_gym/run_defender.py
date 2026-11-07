@@ -12,9 +12,10 @@ MEDIUM_EPISODES (200); change it below if needed.
 
 What a healthy result looks like:
     - none is the worst (or tied worst) on exposure: it is the baseline
-    - sweep beats none and random on exposure, at some action cost
-    - learned (untrained) scores about the same as random
-    - learned never picks a padded (non-existent) host row
+    - sweep beats none on exposure, at some action cost
+    - untrained (learned network, random weights) scores well below sweep
+    - trained (after trainer.py) scores above untrained
+    - untrained never picks a padded (non-existent) host row
 
 "win %" is the share of episodes that end with no sensitive host breached
 (the defender win rate from the proposal). "vs none" is the defender's mean
@@ -24,6 +25,7 @@ which is the proposal's false positive measure. Note the env's per-action
 cost (Monitor 0.01, Restore 0.1) is flat: it charges every Restore the same,
 so it does NOT penalize false positives specifically.
 """
+import os
 import sys
 
 import matplotlib
@@ -32,7 +34,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from env import DefenderEnv, RESTORE
-from policies import GreedyAttacker, NoDefense, RandomAttacker, RandomDefender, SweepDefender
+from policies import GreedyAttacker, NoDefense, RandomAttacker, SweepDefender
 
 # The learned policy needs torch. If torch isn't installed, skip it
 # instead of crashing, so the scripted defenders can still be tested.
@@ -105,11 +107,14 @@ def run_episodes(env, policy, episodes):
 
 def make_defenders(env):
     """Build the defenders to test. A new set is made per scenario."""
-    defenders = {"none": NoDefense(), "random": RandomDefender(), "sweep": SweepDefender()}
+    defenders = {"none": NoDefense(), "sweep": SweepDefender()}
     if LearnedPolicy is not None:
         # Untrained network, sized from the env's observation/action shapes
         # (4 features per host, 3 action kinds).
-        defenders["learned"] = LearnedPolicy.for_env(env)
+        defenders["untrained"] = LearnedPolicy.for_env(env)
+        # Trained network from trainer.py, if it has been run.
+        if os.path.exists("checkpoints/defender.pt"):
+            defenders["trained"] = LearnedPolicy.from_file("checkpoints/defender.pt")
     return defenders
 
 
@@ -150,7 +155,9 @@ if __name__ == "__main__":
     #   2 - sensitive hosts breached at the end (lower = better)
     #   3 - total defender reward (higher = better)
     #   4 - action cost paid (what the defense cost to run)
-    colors = {"none": "#c44", "random": "#888", "sweep": "#48c", "learned": "#4a4"}
+    # ColorBrewer RdGy (4-class), the slide palette
+    colors = {"none": "#ca0020", "sweep": "#f4a582", "untrained": "#bababa",
+              "trained": "#404040"}
     fig, axes = plt.subplots(len(results), 4, figsize=(20, 4.5 * len(results)), squeeze=False)
     for (size, by_def), (ax1, ax2, ax3, ax4) in zip(results.items(), axes):
         labels = list(by_def)
@@ -179,5 +186,28 @@ if __name__ == "__main__":
                  f"({n_episodes['small']} small / {n_episodes['medium']} medium episodes)")
     fig.tight_layout()
     out = f"defender_vs_{attacker_name}.png"
+    fig.savefig(out, dpi=150)
+    print(f"Saved chart to {out}")
+
+    # Slide chart: small only, exposure and breaches.
+    by_def = results["small"]
+    labels = list(by_def)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4.5))
+    for label, res in by_def.items():
+        ax1.plot(res["curve"], label=label, color=colors[label])
+    ax1.set_title(f"small: exposure per step (mean, {n_episodes['small']} episodes)")
+    ax1.set_xlabel("step")
+    ax1.set_ylabel("exposure (0 to 1)")
+    ax1.set_ylim(0, 1)
+    ax1.legend()
+    data = [by_def[l]["breached"] for l in labels]
+    ax2.bar(labels, [d.mean() for d in data], yerr=[d.std() for d in data],
+            capsize=6, color=[colors[l] for l in labels])
+    ax2.set_title("small: sensitive hosts breached at end")
+    ax2.set_ylabel("hosts")
+    fig.suptitle(f"Defender policies vs {attacker_name} attacker, small network "
+                 f"({n_episodes['small']} episodes)")
+    fig.tight_layout()
+    out = f"defender_vs_{attacker_name}_small.png"
     fig.savefig(out, dpi=150)
     print(f"Saved chart to {out}")

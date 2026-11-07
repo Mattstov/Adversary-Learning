@@ -2,21 +2,25 @@
 
 Plays each attacker policy for N episodes against a fixed defender, on the
 small and the medium scenario, prints the average results, and saves a
-chart to attacker_baselines.png.
+chart to attacker_vs_<defender>.png.
 
 Usage (from inside defender_gym/, with the venv active):
-    python run_attacker.py ../NASimEmu-master/scenarios [episodes]
+    python run_attacker.py ../NASimEmu-master/scenarios [episodes] [none|sweep|random]
+
+The last argument picks the fixed defender (default none). Run it once with
+none (the attacker's raw strength) and once with sweep (against a defense).
 
 What a healthy result looks like:
     - greedy clearly beats random (it actually plans its attacks)
-    - learned (untrained) scores about the same as random
-    - learned never picks a padded (non-existent) host row
+    - untrained (learned network, random weights) scores about the same as random
+    - untrained never picks a padded (non-existent) host row
     - greedy does not collapse on medium compared to small
 
 "success %" is the share of episodes where the attacker breached at least one
 sensitive host. Against NoDefense it equals 100 minus the defender win rate
 used in the proposal, so this run doubles as the proposal's NoOp baseline.
 """
+import os
 import sys
 
 import matplotlib
@@ -25,7 +29,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from env import AttackerEnv
-from policies import GreedyAttacker, NoDefense, RandomAttacker
+from policies import GreedyAttacker, NoDefense, RandomAttacker, RandomDefender, SweepDefender
 
 # The learned policy needs torch. If torch isn't installed, skip it
 # instead of crashing, so the scripted attackers can still be tested.
@@ -85,13 +89,18 @@ def make_attackers(env):
     attackers = {"random": RandomAttacker(), "greedy": GreedyAttacker()}
     if LearnedPolicy is not None:
         # Untrained network, sized from the env's observation/action shapes.
-        attackers["learned"] = LearnedPolicy.for_env(env)
+        attackers["untrained"] = LearnedPolicy.for_env(env)
+        # Trained network from trainer.py, if it has been run.
+        if os.path.exists("checkpoints/attacker.pt"):
+            attackers["trained"] = LearnedPolicy.from_file("checkpoints/attacker.pt")
     return attackers
 
 
 if __name__ == "__main__":
     folder = sys.argv[1] if len(sys.argv) > 1 else "scenarios"
     episodes = int(sys.argv[2]) if len(sys.argv) > 2 else 100
+    defender_name = sys.argv[3] if len(sys.argv) > 3 else "none"
+    DEFENDERS = {"none": NoDefense, "sweep": SweepDefender, "random": RandomDefender}
 
     if LearnedPolicy is None:
         print("torch not installed: skipping the learned policy\n")
@@ -99,12 +108,12 @@ if __name__ == "__main__":
     # results[size][label] = (totals, breached, padded, curve), used for the chart
     results = {}
     for size, name in SCENARIOS.items():
-        # NoDefense = the defender never acts, so we measure the attacker's
-        # strength on its own. Swap in SweepDefender() to test against a
-        # simple defender.
-        env = AttackerEnv(f"{folder}/{name}.v2.yaml", defender=NoDefense())
+        # none = the defender never acts, so we measure the attacker's
+        # strength on its own. sweep / random = a fixed scripted defender.
+        env = AttackerEnv(f"{folder}/{name}.v2.yaml", defender=DEFENDERS[defender_name]())
 
-        print(f"=== {size} ({name}), {episodes} episodes x {env.game.max_steps} steps")
+        print(f"=== {size} ({name}) vs {defender_name} defender, "
+              f"{episodes} episodes x {env.game.max_steps} steps")
         # success = % of episodes where the attacker compromised at least one
         # sensitive host. Against NoDefense this is 100 - the defender win rate
         # from the proposal's metrics.
@@ -123,7 +132,8 @@ if __name__ == "__main__":
     #   left   - exposure over the episode (how fast each attacker gets in)
     #   middle - sensitive hosts breached at the end (higher = stronger attacker)
     #   right  - total attacker reward
-    colors = {"random": "#888", "greedy": "#c44", "learned": "#48c"}
+    # ColorBrewer RdGy (4-class), the slide palette
+    colors = {"greedy": "#ca0020", "random": "#f4a582", "untrained": "#bababa", "trained": "#404040"}
     fig, axes = plt.subplots(len(results), 3, figsize=(16, 4.5 * len(results)), squeeze=False)
     for (size, by_attacker), (ax1, ax2, ax3) in zip(results.items(), axes):
         labels = list(by_attacker)
@@ -150,7 +160,30 @@ if __name__ == "__main__":
         ax3.set_title(f"{size}: total attacker reward")
         ax3.set_ylabel("reward")
 
-    fig.suptitle(f"Attacker policies vs no defense, {episodes} episodes each")
+    fig.suptitle(f"Attacker policies vs {defender_name} defender, {episodes} episodes each")
     fig.tight_layout()
-    fig.savefig("attacker_baselines.png", dpi=150)
-    print("Saved chart to attacker_baselines.png")
+    out = f"attacker_vs_{defender_name}.png"
+    fig.savefig(out, dpi=150)
+    print(f"Saved chart to {out}")
+
+    # Slide chart: small only, exposure and breaches.
+    by_attacker = results["small"]
+    labels = list(by_attacker)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4.5))
+    for label, (_, _, _, curve) in by_attacker.items():
+        ax1.plot(curve, label=label, color=colors[label])
+    ax1.set_title(f"small: exposure per step (mean, {episodes} episodes)")
+    ax1.set_xlabel("step")
+    ax1.set_ylabel("exposure (0 to 1)")
+    ax1.set_ylim(0, 1)
+    ax1.legend()
+    breached = [by_attacker[l][1] for l in labels]
+    ax2.bar(labels, [b.mean() for b in breached], yerr=[b.std() for b in breached],
+            capsize=6, color=[colors[l] for l in labels])
+    ax2.set_title("small: sensitive hosts breached at end")
+    ax2.set_ylabel("hosts")
+    fig.suptitle(f"Attacker policies vs {defender_name} defender, small network ({episodes} episodes)")
+    fig.tight_layout()
+    out = f"attacker_vs_{defender_name}_small.png"
+    fig.savefig(out, dpi=150)
+    print(f"Saved chart to {out}")

@@ -1,3 +1,6 @@
 venv/
 __pycache__/
 *.pyc
+.venv/
+defender_gym/checkpoints_selfplay/
+defender_gym/checkpoints/*_ep*.pt
